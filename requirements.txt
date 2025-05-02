@@ -6,3 +6,4 @@ httpcore==0.17.3
 httpx==0.24.1
 pandas==2.2.3
 openpyxl==3.1.5
+psycopg2-binary==2.9.9

@@ -14,6 +14,20 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 TOKEN = os.getenv('TOKEN')
 
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+import psycopg2
+from datetime import datetime
+import random
+import openai
+import os
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+
 # Initialize OpenAI client
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
@@ -27,10 +41,10 @@ FUN_FACTS = [
 
 # Nethermind team members (fictional Telegram handles for this example, except for Cristiano)
 TEAM_MEMBERS = {
-    'audit': ("@joseonchain", "Jose L. Zamorano, our Senior Business Development Consultant"),
-    'audit_cristiano': ("@cmdsilva25", "Cristiano Silva, our Web3 Security Manager at Nethermind"), 
-    'overall': ("@spacevii", "Vii, BD assistant"),
-    
+    'audit': ("@AnnaTheAuditor", "Anna, our Audit Expert"),
+    'audit_cristiano': ("@cmdsilva25", "Cristiano Silva, our Smart Contract Auditing Specialist"),
+    'node': ("@MikeTheNodeMaster", "Mike, our Node Specialist"),
+    'sales': ("@SarahTheSalesStar", "Sarah, our Sales Lead")
 }
 
 # Nethermind Telegram groups (fictional for this example)
@@ -41,16 +55,23 @@ GROUPS = [
     [InlineKeyboardButton("🚀 Dev Chat", url='https://t.me/NethermindDevs')]
 ]
 
-# Initialize SQLite database
+# Initialize Postgres database
 def init_db():
-    conn = sqlite3.connect('audit_inquiries.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS inquiries
-                 (date_submitted TEXT, user_full_name TEXT, telegram_username TEXT,
-                  project_details TEXT, meeting_location TEXT, contact_info TEXT,
-                  audit_timeline TEXT)''')
-    conn.commit()
-    conn.close()
+    logger.info("Initializing database...")
+    DATABASE_URL = os.getenv('DATABASE_URL')
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS inquiries
+                     (date_submitted TEXT, user_full_name TEXT, telegram_username TEXT,
+                      project_details TEXT, meeting_location TEXT, contact_info TEXT,
+                      audit_timeline TEXT)''')
+        conn.commit()
+        conn.close()
+        logger.info("Database initialized successfully.")
+    except Exception as e:
+        logger.error(f"Error initializing database: {str(e)}")
+        raise
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, message: str = None):
     keyboard = [
@@ -124,6 +145,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'expecting' in context.user_data:
         try:
             if context.user_data['expecting'] == 'audit_project':
+                logger.info(f"Received project description from user {update.message.from_user.first_name}: {text}")
                 context.user_data['audit_data']['project_details'] = text
                 # Use OpenAI to repeat the description back
                 response = client.chat.completions.create(
@@ -138,23 +160,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data['expecting'] = 'audit_where_met'
 
             elif context.user_data['expecting'] == 'audit_where_met':
+                logger.info(f"Received meeting location from user {update.message.from_user.first_name}: {text}")
                 context.user_data['audit_data']['where_met'] = text
                 context.user_data['expecting'] = 'audit_contact'
                 await update.message.reply_text("📧 Thanks! What’s your contact information? (e.g., email or phone number)")
 
             elif context.user_data['expecting'] == 'audit_contact':
+                logger.info(f"Received contact info from user {update.message.from_user.first_name}: {text}")
                 context.user_data['audit_data']['contact_info'] = text
                 context.user_data['expecting'] = 'audit_timeline'
                 await update.message.reply_text("⏰ Almost done! How soon do you need the audit? (e.g., 1 week, 1 month)")
 
             elif context.user_data['expecting'] == 'audit_timeline':
+                logger.info(f"Received audit timeline from user {update.message.from_user.first_name}: {text}")
                 context.user_data['audit_data']['audit_timeline'] = text
 
-                # All data collected, save to SQLite
+                # All data collected, save to Postgres
                 audit_data = context.user_data['audit_data']
-                conn = sqlite3.connect('audit_inquiries.db')
+                logger.info("Attempting to save inquiry to database...")
+                DATABASE_URL = os.getenv('DATABASE_URL')
+                conn = psycopg2.connect(DATABASE_URL, sslmode='require')
                 c = conn.cursor()
-                c.execute("INSERT INTO inquiries VALUES (?, ?, ?, ?, ?, ?, ?)",
+                c.execute("INSERT INTO inquiries VALUES (%s, %s, %s, %s, %s, %s, %s)",
                           (datetime.now().strftime('%Y-%m-%d %I:%M %p'),
                            f"{update.message.from_user.first_name} {update.message.from_user.last_name or ''}".strip() or 'N/A',
                            update.message.from_user.username or 'N/A',
@@ -162,6 +189,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                            audit_data['contact_info'], audit_data['audit_timeline']))
                 conn.commit()
                 conn.close()
+                logger.info("Inquiry saved to database successfully.")
 
                 # Simulate a Google Search to find client info based on contact info
                 contact_info = audit_data['contact_info']
@@ -170,8 +198,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 client_info = "I found that you're likely with a cool tech startup focused on blockchain solutions!"
 
                 # Use OpenAI to create a personalized, cool summary
+                logger.info("Generating personalized summary with OpenAI...")
                 summary_prompt = (
-                    f"Create a personalized, engaging, and cool summary of the following audit inquiry details for the user, (Get straight to the point)  {update.message.from_user.first_name}. "
+                    f"Create a personalized, engaging, and cool summary of the following audit inquiry details for the user {update.message.from_user.first_name}. "
                     f"Include some fun vibes and use this additional client info if available: {client_info}\n"
                     f"Project Description: {audit_data['project_details']}\n"
                     f"Where We Met: {audit_data['where_met']}\n"
@@ -186,17 +215,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ]
                 )
                 personalized_summary = response.choices[0].message.content
+                logger.info("Summary generated successfully.")
 
                 await update.message.reply_text(
                     f"🎉 Awesome, {update.message.from_user.first_name}! We’ve got your audit inquiry locked in! 🚀\n\n"
                     f"{personalized_summary}\n\n"
-                    f"💡 We will reach out! In the mean time, connect with {TEAM_MEMBERS['audit'][1]} or {TEAM_MEMBERS['audit_cristiano'][1]}. Reach out to {TEAM_MEMBERS['audit'][0]} or {TEAM_MEMBERS['audit_cristiano'][0]} on Telegram!\n\n"
-                    f"And because you're so eager, just book a free consultancy call with us!\n"
-                    f"Schedule a meeting via:\n"
+                    f"💡 Want to connect with {TEAM_MEMBERS['audit'][1]} or {TEAM_MEMBERS['audit_cristiano'][1]}? Reach out to {TEAM_MEMBERS['audit'][0]} or {TEAM_MEMBERS['audit_cristiano'][0]} on Telegram!\n\n"
+                    f"If you’re interested, Jose L. Zamorano, our Senior Business Development Consultant, would be delighted to discuss this further. "
+                    f"You can contact him at jose.zamorano@nethermind.io or schedule a meeting via:\n"
                     f"- Europe: https://calendly.com/d/cmv9-fq5-pvf/nethermind-security\n"
                     f"- Americas & APAC: https://calendly.com/d/cq7m-vrj-t3y/nethermind-security-pacific\n\n"
                     f"{random.choice(FUN_FACTS)}\n\n"
-                    "Thank you!😎"
+                    "What’s next on your Nethermind adventure? 😎"
                 )
                 await show_main_menu(update, context)
                 context.user_data.clear()
@@ -220,6 +250,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("⚠️ Please reply with 1, 2, or 3 to choose an option.")
 
         except Exception as e:
+            logger.error(f"Error saving details: {str(e)}")
             await update.message.reply_text(f"⚠️ Error saving your details: {str(e)}. Please try again.")
             context.user_data.clear()
             await show_main_menu(update, context)
